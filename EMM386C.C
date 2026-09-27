@@ -47,6 +47,7 @@ extern ushort far MAXPAGES;
 extern ushort far PAGESAVAIL;
 extern ushort far FRAME;
 extern uchar far NoVCPI;
+extern uchar far WinStdMode;
 extern uchar far FlagNOEMS;
 extern uchar far NoPageFrame;
 extern uchar far SB;
@@ -831,6 +832,13 @@ int TheRealMain(int mode, char far *commandline)
 		}
 		}
 
+	if (FindCommand(commandline, "WINSTD", &found) )
+		{
+		if (startup_verbose)
+			printf("WINSTD: force Windows 3.x into standard mode\n");
+		WinStdMode = TRUE;
+		}
+
 	if (FindCommand(commandline, "VDS", &found) )
 		{
 		if (startup_verbose)	
@@ -956,6 +964,7 @@ int TheRealMain(int mode, char far *commandline)
 		printf("commandline options available for driver\n"
 				" NOEMS      - disable EMS handling\n"
 				" NOVCPI     - disable VCPI handling, requires NOEMS\n"
+				" WINSTD     - force Windows 3.x to start in standard mode\n"
 				" FRAME=E000 - select wanted pageframe for EMS\n"
 				" EMM=8192   - 8192 KB EMS memory wanted-if possible\n"
 				" VDS        - enable Virtual DMA Services - experimental feature\n"

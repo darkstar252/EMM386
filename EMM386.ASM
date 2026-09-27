@@ -121,6 +121,7 @@
 		public _PAGESAVAIL
 		public _FRAME
 		public _NoVCPI
+		public _WinStdMode
 		public _FlagNOEMS
 		public _NoPageFrame
 		public _SB
@@ -861,6 +862,72 @@ endif
 
 
 
+;******************************************************************************
+; INT2Fh handler - watches for AX=1605h/1606h, la "WINDOWS ENHANCED MODE &
+; 286 DOSX INIT BROADCAST" (RBIL, INT 2F/AX=1605h, tabla #02631).
+;
+; Se usa para dos cosas:
+;
+; 1) Comportamiento original (ya lo teníamos hecho hace tiempo, se
+;    reconstruye aquí porque esta es la base "himemmsr" y aquel parche se
+;    aplicó sobre otra copia del fichero): responder correctamente al
+;    protocolo - encadenar SIEMPRE primero, sin tocar nada, porque nuestro
+;    estado (mapeo EMS, VCPI, tabla de UMB) es memoria física compartida,
+;    no datos por-VM, así que no necesitamos instancia propia ni el
+;    callback de activación/desactivación de V86.
+;
+; 2) WINSTD dinámico de verdad (como el DR-DOS original, no solo el switch
+;    estático de CONFIG.SYS): el bit 0 de DX en la llamada de 1605h indica
+;    si quien arranca es Windows enhanced mode (bit0=0, usa V86, es
+;    justo lo que nuestro monitor ya sabe hacer) o un "286 DOS extender"
+;    (bit0=1) - que es exactamente cómo Windows 3.x implementa el Modo
+;    Estándar (WIN /S): no usa V86 en absoluto, cambia a modo protegido
+;    directamente. Si dejamos que VCPI_Presence responda que sí hay VCPI
+;    mientras Windows cree que está en modo estándar, puede confundirse.
+;    Así que: al ver bit0=1 en el 1605h, activamos el mismo mecanismo que
+;    ya usa el switch /WINSTD (la variable _WinStdMode) pero en una
+;    bandera aparte (_AutoWinStd) que se apaga sola en el 1606h de salida
+;    - así no interfiere con quien haya puesto /WINSTD fijo en el
+;    CONFIG.SYS.
+;******************************************************************************
+
+public _old_int2f
+_old_int2f  dd  0      ; vector INT2Fh anterior, se rellena al instalar
+
+public _AutoWinStd
+_AutoWinStd db 0	; WINSTD dinámico activo ahora mismo (Windows está
+			; en medio de un arranque en modo estándar)
+
+public _Int2fHandler
+_Int2fHandler proc far
+    cmp ax,1605h
+    je  short i2f_1605
+    cmp ax,1606h
+    je  short i2f_1606
+    jmp [cs:_old_int2f]        ; ninguna de las dos - encadenar directo
+
+i2f_1605:
+    test dx,1                  ; bit 0: 0=enhanced mode, 1=286 DOS extender
+    jz   short i2f_1605_chain  ; (Modo Estándar de Windows 3.x)
+    mov  [cs:_AutoWinStd],1
+i2f_1605_chain:
+    pushf
+    call [cs:_old_int2f]       ; DEBE encadenar primero, sin tocar nada,
+                                ; antes de procesar (RBIL INT2F/AX=1605h)
+    iret                        ; no tenemos datos de instancia ni
+                                ; instalamos el callback de V86: la
+                                ; respuesta de la cadena vuelve intacta
+
+i2f_1606:
+    mov  [cs:_AutoWinStd],0     ; aviso de salida - desactivar el WINSTD
+                                ; dinámico, tanto si lo activamos como si no
+    jmp  [cs:_old_int2f]        ; nada más que liberar, solo encadenar
+_Int2fHandler endp
+
+;******************************************************************************
+; end of INT2Fh handler
+;******************************************************************************
+
 
 
 
@@ -1332,6 +1399,12 @@ CX_Save			DW	0	; temporary store of cx value
 
 ; boolean flags
 _NoVCPI			DB	0	; flags no VCPI services
+_WinStdMode		DB	0	; /WINSTD: solo la detección de presencia
+					; VCPI (AX=DE00h) falla a propósito, para
+					; que Windows 3.x caiga a modo estándar.
+					; El resto de VCPI sigue intacto (a
+					; diferencia de NOVCPI, que apaga TODO
+					; VCPI y exige NOEMS)
 _FlagNOEMS		DB	0	; flags no EMS services
 _NoPageFrame	DB	0	; flags FRAME=NONE
 _SB				DB	0	; flags SB (soundblaster drivers)
@@ -4097,9 +4170,17 @@ ems4_allocate_pages ENDP
 ;  return BH = 1 (major version), BL = 0 (minor version)
 ;
 VCPI_Presence	PROC	NEAR
+	cmp	fs:[_WinStdMode],0	; /WINSTD fijo por CONFIG.SYS...
+	jne	@@winstd_no_vcpi
+	cmp	fs:[_AutoWinStd],0	; ...o WINSTD dinámico (Windows 3.x
+	jne	@@winstd_no_vcpi	; arrancando en Modo Estándar ahora mismo)
 	mov	bx,100h
 	xor	ah,ah
 	ret
+@@winstd_no_vcpi:
+	mov	ah,84h			; "Invalid Functioncode in AH" - misma
+	ret				; respuesta que ya usa _NoVCPI para
+					; emm_INV_CALL, por coherencia
 VCPI_Presence	ENDP
 
 ;
@@ -4766,6 +4847,18 @@ installed:
 	jmp 	ERR_EX
 
 Neu_inst:
+
+	MOV     AX,352FH              ; save old contents of INT2Fh vector
+	INT     21H                   ; (broadcast de arranque/cierre de
+	MOV     WORD PTR [_old_int2f],BX      ; Windows, para el WINSTD dinámico) -
+	MOV     WORD PTR [_old_int2f+2],ES    ; aquí sí, porque ya sabemos que
+	PUSH    DS                            ; esta instancia va a quedar
+	MOV     DX,OFFSET _Int2fHandler       ; residente de verdad
+	MOV     AX,CS
+	MOV     DS,AX
+	MOV     AX,252FH
+	INT     21H
+	POP     DS
 
 
         MOV     DX,OFFSET DUMMY_CALL ; install EMM-Vector
